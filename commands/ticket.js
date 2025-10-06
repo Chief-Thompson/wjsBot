@@ -6,13 +6,6 @@ module.exports = {
     .setDescription('Open a support ticket'),
 
   async execute(interaction) {
-    // Check if user is admin
-    if (!interaction.member.permissions.has('Administrator')) {
-      return interaction.reply({
-        content: '❌ You must be an administrator to use this command.',
-        ephemeral: true
-      });
-    }
 
     // Show the ticket button
     const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
