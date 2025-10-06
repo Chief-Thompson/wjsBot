@@ -1,0 +1,17 @@
+{
+  "name": "wildjstudios-bot",
+  "version": "1.0.0",
+  "description": "Discord bot for WildJStudios",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "WildJGaming",
+  "license": "ISC",
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "dotenv": "^17.2.3",
+    "node-fetch": "^2.7.0"
+  }
+}
