@@ -21,31 +21,18 @@ module.exports = {
         await interaction.deferReply();
 
         try {
-            // Fetch user info for display
-            let username = 'Unknown';
-            try {
-                const userResponse = await fetch(`https://users.roblox.com/v1/users/${userId}`);
-                if (userResponse.ok) {
-                    const userData = await userResponse.json();
-                    username = userData.name;
-                }
-            } catch (error) {
-                console.log('Could not fetch user data, continuing with history check...');
-            }
-
-            // Get ban history
+            // Get ban history from your ban.js function
             const historyData = await getBanHistory(userId);
             
             if (!historyData.logs || historyData.logs.length === 0) {
-                return interaction.editReply(`✅ No ban history found for user **${username}** (${userId}).`);
+                return interaction.editReply(`✅ No ban history found for user ID **${userId}**.`);
             }
 
             // Create embed
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
-                .setTitle(`🔍 Ban History - ${username}`)
+                .setTitle(`🔍 Ban History`)
                 .setDescription(`User ID: **${userId}**\nFound **${historyData.logs.length}** moderation action(s)`)
-                .setThumbnail(`https://www.roblox.com/headshot-thumbnail/image?userId=${userId}&width=420&height=420&format=png`)
                 .setTimestamp();
 
             // Process and display each log entry
@@ -54,7 +41,7 @@ module.exports = {
                 if (!restriction) return;
 
                 const actionType = restriction.active ? '🔨 BANNED' : '🔓 UNBANNED';
-                const duration = restriction.duration ? 
+                const duration = restriction.duration && restriction.duration !== '0s' ? 
                     `${Math.round(parseInt(restriction.duration) / 60)} minutes` : 'Permanent';
                 
                 const reason = restriction.privateReason || 'No reason provided';
@@ -64,10 +51,6 @@ module.exports = {
                 fieldValue += `**Time:** ${timestamp}\n`;
                 fieldValue += `**Duration:** ${duration}\n`;
                 fieldValue += `**Reason:** ${reason}`;
-                
-                if (restriction.excludeAltAccounts) {
-                    fieldValue += `\n**Alt Accounts:** Included in ban`;
-                }
 
                 embed.addFields({
                     name: `Entry ${index + 1}`,
