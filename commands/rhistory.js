@@ -1,4 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { getBanHistory } = require('../ban.js');
 
 module.exports = {
     data: new SlashCommandBuilder()
@@ -10,54 +11,67 @@ module.exports = {
                 .setRequired(true)),
 
     async execute(interaction) {
-        await interaction.deferReply();
-        
+        const staffRoleId = process.env.BAN_ROLE_ID;
+        if (!interaction.member.roles.cache.has(staffRoleId)) {
+            return interaction.reply({ content: '❌ You do not have permission to use this command.', ephemeral: true });
+        }
+
         const userId = interaction.options.getString('userid');
-        const API_KEY = process.env.ROBLOX_API_KEY;
-        const UNIVERSE_ID = process.env.UNIVERSE_ID;
+        
+        await interaction.deferReply();
 
         try {
-            // Fetch ban history from Roblox API
-            const response = await fetch(`https://apis.roblox.com/cloud/v2/universes/${UNIVERSE_ID}/user-restrictions/${userId}/logs`, {
-                method: 'GET',
-                headers: {
-                    'x-api-key': API_KEY,
-                    'Content-Type': 'application/json'
+            // Fetch user info for display
+            let username = 'Unknown';
+            try {
+                const userResponse = await fetch(`https://users.roblox.com/v1/users/${userId}`);
+                if (userResponse.ok) {
+                    const userData = await userResponse.json();
+                    username = userData.name;
                 }
-            });
-
-            if (!response.ok) {
-                if (response.status === 404) {
-                    return interaction.editReply('❌ No ban history found for this user, or the user does not exist.');
-                }
-                throw new Error(`API returned ${response.status}: ${response.statusText}`);
+            } catch (error) {
+                console.log('Could not fetch user data, continuing with history check...');
             }
 
-            const historyData = await response.json();
+            // Get ban history
+            const historyData = await getBanHistory(userId);
             
             if (!historyData.logs || historyData.logs.length === 0) {
-                return interaction.editReply('✅ No ban history found for this user.');
+                return interaction.editReply(`✅ No ban history found for user **${username}** (${userId}).`);
             }
 
-            // Create embed with ban history
+            // Create embed
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
-                .setTitle(`🔍 Ban History for User ID: ${userId}`)
-                .setDescription(`Found ${historyData.logs.length} moderation action(s)`)
+                .setTitle(`🔍 Ban History - ${username}`)
+                .setDescription(`User ID: **${userId}**\nFound **${historyData.logs.length}** moderation action(s)`)
+                .setThumbnail(`https://www.roblox.com/headshot-thumbnail/image?userId=${userId}&width=420&height=420&format=png`)
                 .setTimestamp();
 
-            // Add each ban entry to the embed
+            // Process and display each log entry
             historyData.logs.forEach((log, index) => {
-                const actionType = log.gameJoinRestriction?.active ? '🔨 BAN' : '🔓 UNBAN';
-                const duration = log.gameJoinRestriction?.duration ? 
-                    `${parseInt(log.gameJoinRestriction.duration) / 60} minutes` : 'Permanent';
+                const restriction = log.gameJoinRestriction;
+                if (!restriction) return;
+
+                const actionType = restriction.active ? '🔨 BANNED' : '🔓 UNBANNED';
+                const duration = restriction.duration ? 
+                    `${Math.round(parseInt(restriction.duration) / 60)} minutes` : 'Permanent';
                 
-                const reason = log.gameJoinRestriction?.privateReason || 'No reason provided';
-                const timestamp = new Date(log.gameJoinRestriction?.startTime || log.updateTime).toLocaleDateString();
+                const reason = restriction.privateReason || 'No reason provided';
+                const timestamp = new Date(restriction.startTime || log.updateTime).toLocaleString();
+
+                let fieldValue = `**Action:** ${actionType}\n`;
+                fieldValue += `**Time:** ${timestamp}\n`;
+                fieldValue += `**Duration:** ${duration}\n`;
+                fieldValue += `**Reason:** ${reason}`;
+                
+                if (restriction.excludeAltAccounts) {
+                    fieldValue += `\n**Alt Accounts:** Included in ban`;
+                }
 
                 embed.addFields({
-                    name: `${actionType} - ${timestamp}`,
-                    value: `**Duration:** ${duration}\n**Reason:** ${reason}\n**Type:** ${log.gameJoinRestriction?.inherited ? 'Inherited (Alt Account)' : 'Direct'}`,
+                    name: `Entry ${index + 1}`,
+                    value: fieldValue,
                     inline: false
                 });
             });
@@ -66,7 +80,7 @@ module.exports = {
 
         } catch (error) {
             console.error('Ban history check error:', error);
-            await interaction.editReply('❌ Failed to retrieve ban history. Please check the User ID and try again.');
+            await interaction.editReply(`❌ Failed to retrieve ban history: ${error.message}`);
         }
     }
 };

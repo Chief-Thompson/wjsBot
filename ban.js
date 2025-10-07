@@ -23,10 +23,9 @@ const HEADERS = {
 async function banUser(userId, reason = 'No reason provided', durationMinutes = 0, moderatorTag = 'Unknown') {
   const url = `https://apis.roblox.com/cloud/v2/universes/${UNIVERSE_ID}/user-restrictions/${userId}`;
   
-  // ✅ FIXED: Use 5 years for "permanent" bans (satisfies API requirement for duration > 0)
+  // Use 5 years for "permanent" bans
   let durationSeconds;
   if (durationMinutes === 0) {
-    // 5 years in seconds = 5 * 365 * 24 * 60 * 60
     durationSeconds = 157680000; // 5 years in seconds
   } else if (durationMinutes > 0) {
     durationSeconds = durationMinutes * 60; // Temporary ban
@@ -48,7 +47,7 @@ async function banUser(userId, reason = 'No reason provided', durationMinutes = 
     gameJoinRestriction: {
       active: true,
       startTime: new Date().toISOString(),
-      duration: durationString, // This will always be > 0
+      duration: durationString,
       privateReason: privateReason,
       displayReason: displayReason,
       excludeAltAccounts: false
@@ -97,4 +96,31 @@ async function unbanUser(userId) {
   }
 }
 
-module.exports = { banUser, unbanUser };
+/**
+ * Get ban history for a user
+ * @param {number|string} userId - Roblox user ID
+ */
+async function getBanHistory(userId) {
+  const url = `https://apis.roblox.com/cloud/v2/universes/${UNIVERSE_ID}/user-restrictions/${userId}/logs`;
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: HEADERS
+    });
+
+    const text = await res.text();
+    if (!res.ok) {
+      if (res.status === 404) {
+        return { logs: [] }; // No history found
+      }
+      throw new Error(`Roblox API Error: ${text}`);
+    }
+
+    return JSON.parse(text || '{}');
+  } catch (err) {
+    throw new Error(`Failed to fetch ban history: ${err.message}`);
+  }
+}
+
+module.exports = { banUser, unbanUser, getBanHistory };
