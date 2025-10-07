@@ -21,21 +21,18 @@ module.exports = {
         await interaction.deferReply();
 
         try {
-            // Get ban history from your ban.js function
             const historyData = await getBanHistory(userId);
             
             if (!historyData.logs || historyData.logs.length === 0) {
                 return interaction.editReply(`✅ No ban history found for user ID **${userId}**.`);
             }
 
-            // Create embed
             const embed = new EmbedBuilder()
                 .setColor(0x0099FF)
                 .setTitle(`🔍 Ban History`)
                 .setDescription(`User ID: **${userId}**\nFound **${historyData.logs.length}** moderation action(s)`)
                 .setTimestamp();
 
-            // Process and display each log entry
             historyData.logs.forEach((log, index) => {
                 const restriction = log.gameJoinRestriction;
                 if (!restriction) return;
