@@ -1,26 +1,26 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionFlagsBits } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('ticket')
-    .setDescription('Open a support ticket'),
+    .setDescription('Post the ticket creation panel.')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator), // Only staff can post
 
   async execute(interaction) {
-
-    // Show the ticket button
-    const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-
-    const ticketRow = new ActionRowBuilder().addComponents(
+    const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId('create_ticket')
-        .setLabel('📩 Open Ticket')
-        .setStyle(ButtonStyle.Primary)
+        .setCustomId('report_player')
+        .setLabel('📣 Report Player')
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId('report_staff')
+        .setLabel('🧑‍💼 Report Staff Member')
+        .setStyle(ButtonStyle.Danger)
     );
 
     await interaction.reply({
-      content: 'Click the button below to create a ticket.',
-      components: [ticketRow],
-      ephemeral: true
+      content: '🎟️ **Create a Ticket**\nPlease choose one of the options below:',
+      components: [row]
     });
   }
 };

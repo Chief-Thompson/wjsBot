@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, Collection, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, Collection, GatewayIntentBits, Events, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
 
@@ -8,22 +8,25 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 // --- Load commands ---
 client.commands = new Collection();
 const commandsPath = path.join(__dirname, 'commands');
-const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-
-for (const file of commandFiles) {
-  const command = require(path.join(commandsPath, file));
-  client.commands.set(command.data.name, command);
+if (fs.existsSync(commandsPath)) {
+  const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
+  for (const file of commandFiles) {
+    const command = require(path.join(commandsPath, file));
+    client.commands.set(command.data.name, command);
+  }
 }
 
 // --- Ticket system ---
-const tickets = new Map();
-const MAX_TICKETS = 4;
 const CATEGORY_ID = '1080201545909543034';
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
+const ADMIN_ROLE_ID = '1075191567528251542'; // Only this role sees staff reports
+const tickets = new Map();
+const MAX_TICKETS = 7;
 
 // --- Interaction handler ---
 client.on(Events.InteractionCreate, async interaction => {
 
-  // --- Slash commands ---
+  // --- Slash Command Handling ---
   if (interaction.isChatInputCommand()) {
     const command = client.commands.get(interaction.commandName);
     if (!command) return;
@@ -32,101 +35,90 @@ client.on(Events.InteractionCreate, async interaction => {
       await command.execute(interaction);
     } catch (error) {
       console.error(error);
-      if (!interaction.replied) {
-        await interaction.reply({ content: '❌ Error executing command.', ephemeral: true });
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: '❌ There was an error executing this command.', ephemeral: true });
+      } else {
+        await interaction.reply({ content: '❌ There was an error executing this command.', ephemeral: true });
       }
     }
+    return; // Don't fall through to button handling
   }
 
-  // --- Button interactions ---
-  if (interaction.isButton()) {
-    const channel = interaction.channel;
+  // --- Button Handling ---
+  if (!interaction.isButton()) return;
 
-    // Initial ticket button
-    if (interaction.customId === 'create_ticket') {
-      const confirmRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('agree_ticket').setLabel('✅ Agree').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('cancel_ticket').setLabel('❌ Cancel').setStyle(ButtonStyle.Danger)
-      );
+  const { customId } = interaction;
 
-      await interaction.reply({
-        content: '⚠️ Please follow the ticket format. Failure to comply may result in ticket closure.\nDo you agree to these rules?',
-        components: [confirmRow],
-        ephemeral: true
-      });
-    }
+  if (customId === 'report_player') {
+    await createTicket(interaction, 'player', STAFF_ROLE_ID);
+  }
 
-    // Agree button
-    if (interaction.customId === 'agree_ticket') {
-      await interaction.deferReply({ ephemeral: true });
+  if (customId === 'report_staff') {
+    await createTicket(interaction, 'staff', ADMIN_ROLE_ID);
+  }
 
-      if (tickets.size >= MAX_TICKETS) return interaction.editReply({ content: '❌ The ticket queue is full.', components: [] });
-      if (tickets.has(interaction.user.id)) return interaction.editReply({ content: '❌ You already have a ticket open.', components: [] });
+  if (customId === 'close_ticket') {
+    const userId = [...tickets.entries()].find(([_, chId]) => chId === interaction.channel.id)?.[0];
+    if (!userId)
+      return interaction.reply({ content: '❌ Cannot find this ticket.', ephemeral: true });
 
-      const ticketChannel = await interaction.guild.channels.create({
-        name: `ticket-${interaction.user.username}`,
-        type: 0,
-        parent: CATEGORY_ID,
-        permissionOverwrites: [
-          { id: interaction.guild.id, deny: ['ViewChannel'] },
-          { id: interaction.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
-          { id: process.env.STAFF_ROLE_ID, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
-        ],
-      });
+    if (!interaction.member.roles.cache.has(STAFF_ROLE_ID) && !interaction.member.roles.cache.has(ADMIN_ROLE_ID))
+      return interaction.reply({ content: '❌ You don’t have permission to close this.', ephemeral: true });
 
-      // Store user ID for persistent tracking
-      tickets.set(interaction.user.id, ticketChannel.id);
+    await interaction.channel.permissionOverwrites.edit(userId, { SendMessages: false });
+    await interaction.reply({ content: '🔒 Ticket closed. User can no longer send messages.', ephemeral: true });
+  }
 
-      const closeButton = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Close Ticket (Staff)').setStyle(ButtonStyle.Secondary)
-      );
+  if (customId === 'delete_ticket') {
+    const userId = [...tickets.entries()].find(([_, chId]) => chId === interaction.channel.id)?.[0];
+    if (!userId)
+      return interaction.reply({ content: '❌ Cannot find this ticket.', ephemeral: true });
 
-      const deleteButton = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('delete_ticket').setLabel('🗑 Delete Ticket (Support Team)').setStyle(ButtonStyle.Danger)
-      );
+    if (!interaction.member.roles.cache.has(ADMIN_ROLE_ID))
+      return interaction.reply({ content: '❌ Only Admins can delete tickets.', ephemeral: true });
 
-      await ticketChannel.send({
-        content: `Hello ${interaction.user}, a staff member will assist you shortly!`,
-        components: [closeButton, deleteButton]
-      });
-
-      await interaction.editReply({ content: `✅ Ticket created: ${ticketChannel}`, components: [] });
-    }
-
-    // Cancel button
-    if (interaction.customId === 'cancel_ticket') {
-      await interaction.update({ content: '❌ Ticket creation canceled.', components: [] });
-    }
-
-    // Close ticket (staff only)
-    if (interaction.customId === 'close_ticket') {
-      const userId = [...tickets.entries()].find(([_, chId]) => chId === channel.id)?.[0];
-      if (!userId) return interaction.reply({ content: '❌ Cannot find this ticket.', ephemeral: true });
-
-      if (!interaction.member.roles.cache.has(process.env.STAFF_ROLE_ID)) {
-        return interaction.reply({ content: '❌ Only staff can close tickets.', ephemeral: true });
-      }
-
-      await channel.permissionOverwrites.edit(userId, { SendMessages: false });
-      await interaction.reply({ content: '🔒 Ticket has been closed (user cannot send messages).', ephemeral: true });
-    }
-
-    // Delete ticket (support team only)
-    if (interaction.customId === 'delete_ticket') {
-      const userId = [...tickets.entries()].find(([_, chId]) => chId === channel.id)?.[0];
-      if (!userId) return interaction.reply({ content: '❌ Cannot find this ticket.', ephemeral: true });
-
-      if (!interaction.member.roles.cache.has(process.env.SUPPORT_ROLE_ID)) {
-        return interaction.reply({ content: '❌ Only support team can delete tickets.', ephemeral: true });
-      }
-
-      tickets.delete(userId);
-      await channel.delete();
-    }
+    tickets.delete(userId);
+    await interaction.channel.delete();
   }
 });
 
-// --- Ready event with ticket recovery ---
+// --- Create ticket function ---
+async function createTicket(interaction, type, visibleRoleId) {
+  await interaction.deferReply({ ephemeral: true });
+
+  if (tickets.has(interaction.user.id))
+    return interaction.editReply({ content: '❌ You already have an open ticket.' });
+
+  if (tickets.size >= MAX_TICKETS)
+    return interaction.editReply({ content: '❌ Ticket queue is full right now.' });
+
+  const ticketChannel = await interaction.guild.channels.create({
+    name: `${type}-report-${interaction.user.username}`,
+    type: 0,
+    parent: CATEGORY_ID,
+    permissionOverwrites: [
+      { id: interaction.guild.id, deny: ['ViewChannel'] },
+      { id: interaction.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
+      { id: visibleRoleId, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] }
+    ]
+  });
+
+  tickets.set(interaction.user.id, ticketChannel.id);
+
+  const controlRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Close Ticket').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('delete_ticket').setLabel('🗑 Delete Ticket').setStyle(ButtonStyle.Danger)
+  );
+
+  await ticketChannel.send({
+    content: `Hello ${interaction.user}, thank you for your ${type === 'staff' ? 'staff misconduct' : 'player'} report.\nA team member will review it shortly.`,
+    components: [controlRow]
+  });
+
+  await interaction.editReply({ content: `✅ Ticket created: ${ticketChannel}`, ephemeral: true });
+}
+
+// --- Ready event and ticket recovery ---
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
@@ -134,20 +126,16 @@ client.once('ready', async () => {
   const category = guild.channels.cache.get(CATEGORY_ID);
 
   if (category) {
-    // ✅ Modern replacement for category.children
     const childChannels = guild.channels.cache.filter(c => c.parentId === category.id);
-
     for (const [, channel] of childChannels) {
-      if (channel.name.startsWith('ticket-')) {
+      if (channel.name.startsWith('player-report') || channel.name.startsWith('staff-report')) {
         const userOverwrite = channel.permissionOverwrites.cache.find(po => po.type === 1 && po.allow.has('ViewChannel'));
-        if (userOverwrite) {
-          tickets.set(userOverwrite.id, channel.id);
-        }
+        if (userOverwrite) tickets.set(userOverwrite.id, channel.id);
       }
     }
   }
 
-  console.log(`Recovered ${tickets.size} tickets from category using user IDs.`);
+  console.log(`Recovered ${tickets.size} tickets after restart ✅`);
 });
 
 // --- Login ---
