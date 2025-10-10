@@ -113,8 +113,8 @@ module.exports = {
                     displayLogs.forEach((log, index) => {
                         const erestriction = log.restrictionType?.gameJoinRestriction || {};
                         const actionType = log.active ? '🔨 BANNED' : '🔓 UNBANNED';
-                        const duration = erestriction.duration && erestriction.duration !== '0s'
-                            ? `${Math.round(parseInt(erestriction.duration) / 60)} minutes`
+                        const duration = log.duration && log.duration !== '0s'
+                            ? `${Math.round(parseInt(log.duration) / 60)} minutes`
                             : 'Permanent';
                         
                         // FIXED: Use privateReason first, then displayReason as fallback
