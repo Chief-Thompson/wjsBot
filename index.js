@@ -21,7 +21,7 @@ const CATEGORY_ID = '1080201545909543034';
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 const ADMIN_ROLE_ID = '1075191567528251542'; // Only this role sees staff reports
 const tickets = new Map();
-const MAX_TICKETS = 7;
+const MAX_TICKETS = 15;
 
 // --- Interaction handler ---
 client.on(Events.InteractionCreate, async interaction => {
