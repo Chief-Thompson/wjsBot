@@ -92,6 +92,16 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton()) {
     const { customId } = interaction;
 
+    // Handle Roblox lookup search type buttons
+    if (customId.startsWith('search_')) {
+      const command = require('./commands/rlookup');
+      if (command.handleButtonInteraction) {
+        await command.handleButtonInteraction(interaction);
+        return; // Don't fall through to ticket system handling
+      }
+    }
+
+    // Ticket system buttons
     if (customId === 'report_player') {
       await createTicket(interaction, 'player', STAFF_ROLE_ID);
     }
