@@ -1,155 +1,99 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder } = require('discord.js');
 const axios = require('axios');
 
-// Helper function for fuzzy matching
-function getFuzzyMatches(query, items, property = 'displayName', threshold = 0.7) {
-    const normalizedQuery = query.toLowerCase();
-    const results = [];
+// Track rate limits
+const rateLimitTracker = {
+    lastRequest: 0,
+    requests: 0,
+    resetTime: 0,
+    isRateLimited: false
+};
+
+// Helper function to check rate limits
+function checkRateLimit() {
+    const now = Date.now();
     
-    for (const item of items) {
-        const itemValue = item[property].toLowerCase();
-        
-        // Exact match check
-        if (itemValue === normalizedQuery) {
-            results.push({ ...item, score: 1.0 });
-            continue;
-        }
-        
-        // Contains check
-        if (itemValue.includes(normalizedQuery) || normalizedQuery.includes(itemValue)) {
-            results.push({ ...item, score: 0.9 });
-            continue;
-        }
-        
-        // Starts with check
-        if (itemValue.startsWith(normalizedQuery) || normalizedQuery.startsWith(itemValue)) {
-            results.push({ ...item, score: 0.8 });
-            continue;
-        }
-        
-        // Simple Levenshtein distance for fuzzy matching
-        const distance = levenshteinDistance(itemValue, normalizedQuery);
-        const maxLength = Math.max(itemValue.length, normalizedQuery.length);
-        const similarity = 1 - (distance / maxLength);
-        
-        if (similarity >= threshold) {
-            results.push({ ...item, score: similarity });
-        }
+    // Reset counter if 60 seconds have passed
+    if (now - rateLimitTracker.lastRequest > 60000) {
+        rateLimitTracker.requests = 0;
+        rateLimitTracker.isRateLimited = false;
     }
     
-    // Sort by score (highest first)
-    return results.sort((a, b) => b.score - a.score).map(item => {
-        const { score, ...rest } = item;
-        return rest;
+    // Check if we're rate limited
+    if (rateLimitTracker.isRateLimited && now < rateLimitTracker.resetTime) {
+        const timeLeft = Math.ceil((rateLimitTracker.resetTime - now) / 1000);
+        return { limited: true, timeLeft };
+    }
+    
+    // Roblox API has limits - let's be conservative
+    if (rateLimitTracker.requests >= 30) { // 30 requests per minute
+        rateLimitTracker.isRateLimited = true;
+        rateLimitTracker.resetTime = now + 60000; // 1 minute
+        return { limited: true, timeLeft: 60 };
+    }
+    
+    rateLimitTracker.requests++;
+    rateLimitTracker.lastRequest = now;
+    return { limited: false, timeLeft: 0 };
+}
+
+// Helper function to handle API errors
+function handleApiError(error) {
+    console.error('API Error:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        headers: error.response?.headers
     });
+    
+    // Check for rate limiting headers
+    if (error.response?.status === 429) {
+        const retryAfter = error.response.headers?.['retry-after'] || 
+                          error.response.headers?.['x-rate-limit-reset'] || 
+                          60;
+        return { type: 'rate_limit', retryAfter: parseInt(retryAfter) };
+    }
+    
+    if (error.response?.status === 400 || error.response?.status === 404) {
+        return { type: 'not_found' };
+    }
+    
+    if (error.response?.status === 500 || error.response?.status === 502 || error.response?.status === 503) {
+        return { type: 'server_error' };
+    }
+    
+    return { type: 'unknown', message: error.message };
 }
 
-// Simple Levenshtein distance implementation
-function levenshteinDistance(a, b) {
-    const matrix = [];
-    
-    for (let i = 0; i <= b.length; i++) {
-        matrix[i] = [i];
-    }
-    
-    for (let j = 0; j <= a.length; j++) {
-        matrix[0][j] = j;
-    }
-    
-    for (let i = 1; i <= b.length; i++) {
-        for (let j = 1; j <= a.length; j++) {
-            if (b.charAt(i - 1) === a.charAt(j - 1)) {
-                matrix[i][j] = matrix[i - 1][j - 1];
-            } else {
-                matrix[i][j] = Math.min(
-                    matrix[i - 1][j - 1] + 1, // substitution
-                    matrix[i][j - 1] + 1,     // insertion
-                    matrix[i - 1][j] + 1      // deletion
-                );
-            }
-        }
-    }
-    
-    return matrix[b.length][a.length];
-}
-
-async function smartUserSearch(query, limit = 15) {
+async function smartUserSearch(query, limit = 10) {
     const isNumeric = /^\d+$/.test(query);
     let exactMatch = null;
-    let displayNameMatches = [];
-    let usernameMatches = [];
+    let otherMatches = [];
+    let rateLimitInfo = null;
     
     try {
-        // Always search by username first (most reliable)
-        try {
-            const searchResponse = await axios.get(
-                `https://users.roblox.com/v1/users/search?keyword=${encodeURIComponent(query)}&limit=50`
-            );
-            
-            const allUsers = searchResponse.data.data || [];
-            
-            // Try to find exact matches first
-            const exactUsernameMatch = allUsers.find(u => 
-                u.name.toLowerCase() === query.toLowerCase()
-            );
-            
-            const exactDisplayNameMatch = allUsers.find(u => 
-                u.displayName.toLowerCase() === query.toLowerCase()
-            );
-            
-            // Prioritize exact username match over display name match
-            if (exactUsernameMatch) {
-                exactMatch = {
-                    ...exactUsernameMatch,
-                    profileUrl: `https://www.roblox.com/users/${exactUsernameMatch.id}/profile`,
-                    matchType: 'username'
-                };
-            } else if (exactDisplayNameMatch) {
-                exactMatch = {
-                    ...exactDisplayNameMatch,
-                    profileUrl: `https://www.roblox.com/users/${exactDisplayNameMatch.id}/profile`,
-                    matchType: 'displayname'
-                };
-            }
-            
-            // Get all users for fuzzy matching
-            const allFormattedUsers = allUsers.map(user => ({
-                id: user.id,
-                name: user.name,
-                displayName: user.displayName,
-                hasVerifiedBadge: user.hasVerifiedBadge || false,
-                profileUrl: `https://www.roblox.com/users/${user.id}/profile`
-            }));
-            
-            // Apply fuzzy matching for display names
-            const fuzzyDisplayMatches = getFuzzyMatches(query, allFormattedUsers, 'displayName', 0.5);
-            
-            // Also get username matches (fuzzy)
-            const fuzzyUsernameMatches = getFuzzyMatches(query, allFormattedUsers, 'name', 0.5);
-            
-            // Combine and deduplicate matches
-            const allMatches = [...fuzzyDisplayMatches, ...fuzzyUsernameMatches];
-            const uniqueMatches = [];
-            const seenIds = new Set();
-            
-            for (const match of allMatches) {
-                if (!seenIds.has(match.id) && (!exactMatch || match.id !== exactMatch.id)) {
-                    seenIds.add(match.id);
-                    uniqueMatches.push(match);
-                }
-            }
-            
-            // Limit results
-            displayNameMatches = uniqueMatches.slice(0, limit);
-            
-        } catch (searchErr) {
-            console.error('Search API error:', searchErr.message);
+        // Check rate limit before making any requests
+        const rateLimitCheck = checkRateLimit();
+        if (rateLimitCheck.limited) {
+            return { 
+                exactMatch: null, 
+                displayNameMatches: [], 
+                rateLimitInfo: { 
+                    limited: true, 
+                    timeLeft: rateLimitCheck.timeLeft 
+                } 
+            };
         }
         
-        // If query is numeric and we haven't found a match, try direct user ID lookup
-        if (isNumeric && !exactMatch) {
+        // STRATEGY 1: If numeric, try direct user ID lookup first
+        if (isNumeric) {
             try {
-                const userResponse = await axios.get(`https://users.roblox.com/v1/users/${query}`);
+                const userResponse = await axios.get(`https://users.roblox.com/v1/users/${query}`, {
+                    timeout: 5000,
+                    headers: {
+                        'User-Agent': 'DiscordBot/1.0'
+                    }
+                });
                 exactMatch = {
                     id: userResponse.data.id,
                     name: userResponse.data.name,
@@ -158,56 +102,205 @@ async function smartUserSearch(query, limit = 15) {
                     profileUrl: `https://www.roblox.com/users/${userResponse.data.id}/profile`,
                     matchType: 'userid'
                 };
+                return { 
+                    exactMatch, 
+                    displayNameMatches: [], 
+                    rateLimitInfo: null 
+                };
             } catch (err) {
-                // User ID not found, that's okay
+                const apiError = handleApiError(err);
+                if (apiError.type === 'rate_limit') {
+                    rateLimitInfo = apiError;
+                }
+                // Not a valid user ID, continue with username search
+            }
+        }
+        
+        // STRATEGY 2: Try exact username lookup via username endpoint
+        try {
+            const usernameResponse = await axios.post(
+                `https://users.roblox.com/v1/usernames/users`,
+                { usernames: [query], excludeBannedUsers: false },
+                {
+                    timeout: 5000,
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'User-Agent': 'DiscordBot/1.0'
+                    }
+                }
+            );
+            
+            if (usernameResponse.data.data && usernameResponse.data.data.length > 0) {
+                const user = usernameResponse.data.data[0];
+                exactMatch = {
+                    id: user.id,
+                    name: user.name,
+                    displayName: user.displayName,
+                    hasVerifiedBadge: user.hasVerifiedBadge || false,
+                    profileUrl: `https://www.roblox.com/users/${user.id}/profile`,
+                    matchType: 'username'
+                };
+            }
+        } catch (err) {
+            const apiError = handleApiError(err);
+            if (apiError.type === 'rate_limit' && !rateLimitInfo) {
+                rateLimitInfo = apiError;
+            }
+        }
+        
+        // If we already have a match, just return it to avoid more API calls
+        if (exactMatch && !rateLimitInfo) {
+            return { 
+                exactMatch, 
+                displayNameMatches: [], 
+                rateLimitInfo: null 
+            };
+        }
+        
+        // STRATEGY 3: Search for similar usernames (only if not rate limited)
+        if (!rateLimitInfo) {
+            try {
+                const searchResponse = await axios.get(
+                    `https://users.roblox.com/v1/users/search?keyword=${encodeURIComponent(query)}&limit=${Math.min(limit + 5, 20)}`,
+                    {
+                        timeout: 5000,
+                        headers: { 'User-Agent': 'DiscordBot/1.0' }
+                    }
+                );
+                
+                const allUsers = searchResponse.data.data || [];
+                
+                // Format users
+                const formattedUsers = allUsers.map(user => ({
+                    id: user.id,
+                    name: user.name,
+                    displayName: user.displayName,
+                    hasVerifiedBadge: user.hasVerifiedBadge || false,
+                    profileUrl: `https://www.roblox.com/users/${user.id}/profile`
+                }));
+                
+                // If we already have an exact match from username endpoint, filter it out
+                if (exactMatch) {
+                    otherMatches = formattedUsers
+                        .filter(user => user.id !== exactMatch.id)
+                        .slice(0, limit);
+                } else {
+                    // Check if search returned an exact match
+                    const exactSearchMatch = formattedUsers.find(user => 
+                        user.name.toLowerCase() === query.toLowerCase() || 
+                        user.displayName.toLowerCase() === query.toLowerCase()
+                    );
+                    
+                    if (exactSearchMatch) {
+                        exactMatch = {
+                            ...exactSearchMatch,
+                            matchType: exactSearchMatch.name.toLowerCase() === query.toLowerCase() ? 'username' : 'displayname'
+                        };
+                        
+                        otherMatches = formattedUsers
+                            .filter(user => user.id !== exactMatch.id)
+                            .slice(0, limit);
+                    } else {
+                        // No exact match, use all search results
+                        otherMatches = formattedUsers.slice(0, limit);
+                    }
+                }
+                
+            } catch (searchErr) {
+                const apiError = handleApiError(searchErr);
+                if (apiError.type === 'rate_limit' && !rateLimitInfo) {
+                    rateLimitInfo = apiError;
+                }
+            }
+        }
+        
+        // STRATEGY 4: For display names, check if any matches have exact display name
+        if (!exactMatch && otherMatches.length > 0 && !rateLimitInfo) {
+            const exactDisplayMatch = otherMatches.find(user => 
+                user.displayName.toLowerCase() === query.toLowerCase()
+            );
+            
+            if (exactDisplayMatch) {
+                exactMatch = {
+                    ...exactDisplayMatch,
+                    matchType: 'displayname'
+                };
+                
+                // Remove from other matches
+                otherMatches = otherMatches.filter(user => user.id !== exactMatch.id);
             }
         }
         
         return {
             exactMatch,
-            displayNameMatches: displayNameMatches.slice(0, limit)
+            displayNameMatches: otherMatches.slice(0, limit),
+            rateLimitInfo
         };
         
     } catch (error) {
         console.error('Roblox search error:', error);
-        return { exactMatch: null, displayNameMatches: [] };
+        return { 
+            exactMatch: null, 
+            displayNameMatches: [], 
+            rateLimitInfo: { type: 'unknown', message: 'Unexpected error' } 
+        };
     }
 }
 
 module.exports = {
     data: new SlashCommandBuilder()
         .setName('rlookup')
-        .setDescription('Look up Roblox user by username, display name, or ID (fuzzy search)')
+        .setDescription('Look up Roblox user by username, display name, or ID')
         .addStringOption(opt =>
             opt.setName('query')
-                .setDescription('Username, display name, or user ID (case-insensitive)')
+                .setDescription('Username, display name, or user ID')
                 .setRequired(true)
         )
         .addIntegerOption(opt =>
             opt.setName('limit')
-                .setDescription('Number of results to show (default: 10, max: 25)')
+                .setDescription('Number of similar results to show (default: 5, max: 15)')
                 .setRequired(false)
                 .setMinValue(1)
-                .setMaxValue(25)
+                .setMaxValue(15)
         ),
     async execute(interaction) {
         await interaction.deferReply();
 
         const query = interaction.options.getString('query').trim();
-        const limit = interaction.options.getInteger('limit') || 10;
+        const limit = interaction.options.getInteger('limit') || 5;
 
         try {
-            const { exactMatch, displayNameMatches } = await smartUserSearch(query, limit);
+            const { exactMatch, displayNameMatches, rateLimitInfo } = await smartUserSearch(query, limit);
 
-            // Handle no results
+            // Handle rate limiting
+            if (rateLimitInfo) {
+                if (rateLimitInfo.type === 'rate_limit') {
+                    const retryAfter = rateLimitInfo.retryAfter || 60;
+                    const minutes = Math.ceil(retryAfter / 60);
+                    
+                    return interaction.editReply({
+                        content: `⚠️ **Rate Limit Reached!**\n\nThe Roblox API is rate limiting our requests. Please wait **${minutes} minute${minutes > 1 ? 's' : ''}** before trying again.\n\n*This is a limitation from Roblox's side, not the bot.*`,
+                        ephemeral: false
+                    });
+                } else if (rateLimitInfo.type === 'server_error') {
+                    return interaction.editReply({
+                        content: `❌ **Roblox API Error**\n\nRoblox's servers are currently experiencing issues. Please try again in a few minutes.\n\n*Error: ${rateLimitInfo.message || 'Server unavailable'}*`,
+                        ephemeral: false
+                    });
+                }
+            }
+
+            // Handle no results (but only if not rate limited)
             if (!exactMatch && displayNameMatches.length === 0) {
-                return interaction.editReply(`❌ No Roblox users found matching: **${query}**\n*Try a different spelling or search term.*`);
+                return interaction.editReply({
+                    content: `❌ No Roblox users found matching: **${query}**\n\n*Note: If you're sure this user exists, it might be due to:*\n• Private/deleted account\n• Search limitations (display names are harder to search)\n• Try using their exact username instead of display name`,
+                    ephemeral: false
+                });
             }
 
             const embed = new EmbedBuilder()
-                .setColor(0x0099ff)
+                .setColor(0x00AE86) // Roblox green
                 .setTitle('🔍 Roblox User Lookup')
-                .setDescription(`**Search:** ${query}`)
                 .setTimestamp();
 
             // Add exact match section if found
@@ -230,79 +323,76 @@ module.exports = {
                         break;
                 }
                 
+                embed.setDescription(`**Search:** ${query}\n**Match Type:** ${matchType}`);
+                
                 embed.addFields({
-                    name: `${matchEmoji} ${matchType}`,
-                    value: `**${exactMatch.displayName}** (@${exactMatch.name})\n**ID:** \`${exactMatch.id}\` • **Verified:** ${exactMatch.hasVerifiedBadge ? '✅' : '❌'}\n[View Profile](${exactMatch.profileUrl})`,
+                    name: `${matchEmoji} ${exactMatch.displayName}`,
+                    value: `**Username:** @${exactMatch.name}\n**ID:** \`${exactMatch.id}\`\n**Verified:** ${exactMatch.hasVerifiedBadge ? '✅' : '❌'}\n[View Profile](${exactMatch.profileUrl})`,
                     inline: false
                 });
                 
                 // Get avatar thumbnail
                 try {
                     const avatarResponse = await axios.get(
-                        `https://thumbnails.roblox.com/v1/users/avatar?userIds=${exactMatch.id}&size=420x420&format=Png&isCircular=false`
+                        `https://thumbnails.roblox.com/v1/users/avatar?userIds=${exactMatch.id}&size=150x150&format=Png&isCircular=false`,
+                        { timeout: 3000 }
                     );
                     if (avatarResponse.data.data && avatarResponse.data.data[0]) {
                         embed.setThumbnail(avatarResponse.data.data[0].imageUrl);
                     }
                 } catch (err) {
-                    // If avatar fails, try the bust image
-                    try {
-                        const bustResponse = await axios.get(
-                            `https://thumbnails.roblox.com/v1/users/avatar-bust?userIds=${exactMatch.id}&size=150x150&format=Png&isCircular=false`
-                        );
-                        if (bustResponse.data.data && bustResponse.data.data[0]) {
-                            embed.setThumbnail(bustResponse.data.data[0].imageUrl);
-                        }
-                    } catch (bustErr) {
-                        // Both failed, continue without thumbnail
-                    }
+                    console.log('Avatar fetch failed:', err.message);
                 }
+            } else {
+                embed.setDescription(`**Search:** ${query}\n*No exact match found*`);
             }
 
             // Add other matches section
             if (displayNameMatches.length > 0) {
                 let matchResults = '';
-                const maxEmbedResults = 8; // Keep embed readable
+                const maxEmbedResults = Math.min(displayNameMatches.length, 5);
                 const showMatches = displayNameMatches.slice(0, maxEmbedResults);
                 
                 showMatches.forEach((user, index) => {
                     const verifiedBadge = user.hasVerifiedBadge ? ' ✅' : '';
-                    matchResults += `${index + 1}. **${user.displayName}**${verifiedBadge} (@${user.name})\n   **ID:** \`${user.id}\` • [Profile](${user.profileUrl})\n`;
+                    matchResults += `${index + 1}. **${user.displayName}**${verifiedBadge} (@${user.name})\n   **ID:** \`${user.id}\`\n`;
                 });
 
-                // Add note if there are more results
-                if (displayNameMatches.length > maxEmbedResults) {
-                    matchResults += `\n*... and ${displayNameMatches.length - maxEmbedResults} more fuzzy matches*`;
-                }
-
-                const matchType = exactMatch ? 'Similar Matches' : 'Fuzzy Matches';
+                const fieldName = exactMatch ? 'Similar Users' : 'Search Results';
                 embed.addFields({
-                    name: `🔍 ${matchType} (${displayNameMatches.length})`,
+                    name: `🔍 ${fieldName} (${displayNameMatches.length})`,
                     value: matchResults || 'No additional matches found.',
                     inline: false
                 });
             }
 
-            // Add result count to footer
+            // Add result count and rate limit warning if needed
             const totalResults = (exactMatch ? 1 : 0) + displayNameMatches.length;
-            embed.setFooter({ 
-                text: `Found ${totalResults} result(s) • Searched: "${query}" (case-insensitive)` 
-            });
+            let footerText = `Found ${totalResults} result(s)`;
+            
+            if (rateLimitTracker.requests > 20) {
+                const remaining = Math.max(0, 30 - rateLimitTracker.requests);
+                footerText += ` • Rate limit: ${remaining}/30 reqs left`;
+            }
+            
+            embed.setFooter({ text: footerText });
 
             // Add select menu if we have multiple results
             const components = [];
-            if (displayNameMatches.length > 0) {
-                const options = displayNameMatches.slice(0, 25).map((user, index) => ({
+            const allUsers = exactMatch ? [exactMatch, ...displayNameMatches] : displayNameMatches;
+            
+            if (allUsers.length > 1) {
+                const options = allUsers.slice(0, 10).map((user, index) => ({
                     label: `${user.displayName.length > 20 ? user.displayName.substring(0, 20) + '...' : user.displayName}`,
                     value: user.id.toString(),
-                    description: `@${user.name}`,
-                    emoji: ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'][index] || '👤'
+                    description: `@${user.name} | ID: ${user.id}`,
+                    emoji: index === 0 && exactMatch ? '⭐' : (['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣'][index] || '👤')
                 }));
 
                 if (options.length > 0) {
                     const selectMenu = new StringSelectMenuBuilder()
                         .setCustomId('user_select')
-                        .setPlaceholder('Quick lookup another user...')
+                        .setPlaceholder('Select user for details...')
                         .addOptions(options);
 
                     const row = new ActionRowBuilder().addComponents(selectMenu);
@@ -317,7 +407,10 @@ module.exports = {
 
         } catch (error) {
             console.error('Roblox lookup error:', error);
-            return interaction.editReply('❌ There was an error looking up Roblox users. Please try again later.');
+            return interaction.editReply({
+                content: '❌ **Unexpected Error**\n\nThere was an unexpected error while looking up Roblox users. The error has been logged.\n\n*Please try again in a few moments.*',
+                ephemeral: false
+            });
         }
     }
 };
