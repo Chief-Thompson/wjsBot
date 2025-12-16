@@ -437,7 +437,6 @@ client.once('ready', async () => {
 
   console.log(`Recovered ${tickets.size} tickets after restart ✅`);
 });
-require('./deploy-commands'); // registers slash commands on startup
 
 // --- Login ---
 client.login(process.env.TOKEN);
