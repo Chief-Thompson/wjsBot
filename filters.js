@@ -6,7 +6,7 @@ const bannedWords = [
   'Spearchucker', 'Timber-nigger', 'shitnigger', 'asslick', 'shithead', 'asshole',
   'asshole', 'cuntlicker', 'kunt', 'spaghettinigger', 'Towel-head', 'Chernozhopy',
   'asslicker', 'Bluegum', 'twat', 'ABCD', 'bitchslap', 'bulldyke', 'choad', 'cumshot',
-  'fatass', 'jigger', 'kyke', 'cumskin', 'asian', 'asscowboy', 'assmuncher', 'banging',
+  'fatass', 'jigger', 'nigga', 'kyke', 'cumskin', 'asian', 'asscowboy', 'assmuncher', 'banging',
   'Burrhead', 'Camel-Jockey', 'coon', 'crotchrot', 'cumfest', 'dicklicker', 'fag',
   'fagot', 'felatio', 'fatfuck', 'goldenshower', 'hore', 'jackoff', 'jigg', 'jigga',
   'jizjuice', 'jizm', 'jiz', 'jigger', 'jizzim', 'kumming', 'kunilingus', 'Moolinyan',
@@ -50,7 +50,7 @@ const bannedWords = [
   'Latinx', 'yambag', 'boob', 'beef curtains', 'clunge', 'af', 'wokeness', 'bitchez',
   'Iceberg Fuckers', 'Zhyd', 'bellend', 'arsehole', 'tatas', 'assassinate', 'boonga',
   'booby', 'bullcrap', 'defecate', 'Dhoti', 'dope', 'hobo', 'bigass', 'hussy', 
-  'illegal', 'ky', 'moneyshot', 'molestor', 'nooner', 'nookie', 'nookey', 'Paleface',
+    'ky', 'moneyshot', 'molestor', 'nooner', 'nookie', 'nookey', 'Paleface',
   'pansy', 'peehole', 'phonesex', 'period', 'pornking', 'pornflick', 'porn', 'pooper',
   'sexwhore', 'shitface', 'shit', 'slav', 'slimeball', 'sniggers', 'snowback',
   'spermherder', 'spankthemonkey', 'spitter', 'strapon', 'Tacohead', 'suckoff',
@@ -100,19 +100,22 @@ function filterBanReason(reason) {
     // Convert to lowercase for case-insensitive matching
     const lowerReason = reason.toLowerCase();
     
-    // Check for banned words and replace with ####
+    // Check for banned words and replace with #### - FIXED VERSION
     bannedWords.forEach(word => {
-        if (lowerReason.includes(word.toLowerCase())) {
+        // Create regex with word boundaries to match whole words only
+        // The \b matches word boundaries (non-word characters or start/end of string)
+        const regex = new RegExp(`(?:^|\\s|[^a-zA-Z])${word}(?:$|\\s|[^a-zA-Z])`, 'gi');
+        
+        if (regex.test(reason)) {  // Test on original case-preserved string
             issues.push(`Contains inappropriate language: ${word}`);
-            const regex = new RegExp(word, 'gi');
             filteredReason = filteredReason.replace(regex, '####');
         }
     });
     
     // Check for personal information patterns
-    const phoneRegex = /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/;
-    const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/;
-    const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/;
+    const phoneRegex = /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g;
+    const emailRegex = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/gi;
+    const ipRegex = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g;
     
     if (phoneRegex.test(filteredReason)) {
         issues.push(`Contains phone number`);
