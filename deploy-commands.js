@@ -8,8 +8,8 @@ console.log('Current directory:', __dirname);
 
 // Debug: Check environment variables
 console.log('🔧 Debug: Checking environment variables...');
-console.log('DISCORD_TOKEN exists:', !!process.env.DISCORD_TOKEN);
-console.log('DISCORD_TOKEN length:', process.env.DISCORD_TOKEN ? process.env.DISCORD_TOKEN.length : 0);
+console.log('TOKEN exists:', !!process.env.TOKEN);
+console.log('TOKEN length:', process.env.TOKEN ? process.env.TOKEN.length : 0);
 console.log('CLIENT_ID exists:', !!process.env.CLIENT_ID);
 console.log('GUILD_ID exists:', !!process.env.GUILD_ID);
 
@@ -52,10 +52,10 @@ if (commands.length > 0) {
 }
 
 // Check environment variables
-if (!process.env.DISCORD_TOKEN) {
-    console.error('❌ DISCORD_TOKEN is missing from .env');
+if (!process.env.TOKEN) { // Changed from DISCORD_TOKEN to TOKEN
+    console.error('❌ TOKEN is missing from .env');
     console.log('Please check your .env file and make sure it contains:');
-    console.log('DISCORD_TOKEN=your_actual_bot_token_here');
+    console.log('TOKEN=your_actual_bot_token_here');
     process.exit(1);
 }
 if (!process.env.CLIENT_ID) {
@@ -100,7 +100,7 @@ const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
         } else if (error.code === 10004) {
             console.error('Unknown Guild - Check GUILD_ID');
         } else if (error.code === 40001) {
-            console.error('Unauthorized - Check if DISCORD_TOKEN is valid');
+            console.error('Unauthorized - Check if TOKEN is valid');
         } else if (error.status === 401) {
             console.error('Authentication Failed - Invalid token');
         } else if (error.status === 403) {
