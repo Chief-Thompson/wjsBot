@@ -32,6 +32,7 @@ if (fs.existsSync(commandsPath)) {
 // --- Ticket system ---
 const CATEGORY_ID = '1080201545909543034';
 const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
+const Ticket_ADMIN_ROLE_ID = '1075191567528251542'; // Only this role sees staff reports
 const ADMIN_ROLE_ID = '1450423594050912400'; // Only this role sees staff reports
 const CONCLUSION_CHANNEL_ID = '1450420195217641705'; // Ticket logging channel
 const USER_NOTIFICATION_CHANNEL_ID = '998410531406872606'; // Replace with your user notification channel ID
@@ -134,7 +135,7 @@ async function showConclusionModal(interaction) {
   if (!userId)
     return interaction.reply({ content: '❌ Cannot find this ticket.', ephemeral: true });
 
-  if (!interaction.member.roles.cache.has(STAFF_ROLE_ID) && !interaction.member.roles.cache.has(ADMIN_ROLE_ID))
+  if (!interaction.member.roles.cache.has(STAFF_ROLE_ID) && !interaction.member.roles.cache.has(Ticket_ADMIN_ROLE_ID))
     return interaction.reply({ content: '❌ You don\'t have permission to close this.', ephemeral: true });
 
   // Create the modal
@@ -403,7 +404,7 @@ async function deleteTicket(interaction) {
   
   const [userId] = entry;
 
-  if (!interaction.member.roles.cache.has(ADMIN_ROLE_ID))
+  if (!interaction.member.roles.cache.has(Ticket_ADMIN_ROLE_ID))
     return interaction.reply({ content: '❌ Only Admins can delete tickets.', ephemeral: true });
 
   // Delete from map and delete channel
