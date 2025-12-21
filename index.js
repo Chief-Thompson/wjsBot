@@ -68,63 +68,124 @@ const FORMAT_GUIDES = {
     .setFooter({ text: 'This report will only be visible to administrators. Please be patient.' })
 };
 
-// --- Interaction handler ---
+// --- Interaction handler with improved error handling ---
 client.on(Events.InteractionCreate, async interaction => {
-
   // --- Slash Command Handling ---
   if (interaction.isChatInputCommand()) {
     const command = client.commands.get(interaction.commandName);
     if (!command) return;
 
     try {
+      // Check if interaction is too old (over 14 minutes)
+      const MAX_INTERACTION_AGE = 14 * 60 * 1000; // 14 minutes (safety margin)
+      if (Date.now() - interaction.createdTimestamp > MAX_INTERACTION_AGE) {
+        try {
+          await interaction.reply({
+            content: '❌ This command took too long to process. Please try again.',
+            ephemeral: true
+          });
+        } catch (replyError) {
+          console.log(`Could not send timeout message for command ${interaction.commandName}:`, replyError.message);
+        }
+        return;
+      }
+
       await command.execute(interaction);
     } catch (error) {
-      console.error(error);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.followUp({ content: '❌ There was an error executing this command.', ephemeral: true });
-      } else {
-        await interaction.reply({ content: '❌ There was an error executing this command.', ephemeral: true });
+      console.error(`Error executing command ${interaction.commandName}:`, error);
+      
+      // Don't try to reply if channel/message is gone
+      if (error.code === 10003 || error.code === 10008) {
+        console.log(`Cannot send error message for command ${interaction.commandName}: ${error.message}`);
+        return;
+      }
+      
+      // For other errors, try to reply
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.editReply({ 
+            content: '❌ There was an error executing this command.', 
+            embeds: [] 
+          });
+        } else {
+          await interaction.reply({ 
+            content: '❌ There was an error executing this command.', 
+            ephemeral: true 
+          });
+        }
+      } catch (replyError) {
+        console.error('Failed to send error message to user:', replyError);
       }
     }
     return; // Don't fall through to button handling
   }
 
-  // --- Button Handling ---
+  // --- Button Handling with error handling ---
   if (interaction.isButton()) {
-    const { customId } = interaction;
+    try {
+      const { customId } = interaction;
 
-    // Handle Roblox lookup search type buttons
-    if (customId.startsWith('search_')) {
-      const command = require('./commands/rlookup');
-      if (command.handleButtonInteraction) {
-        await command.handleButtonInteraction(interaction);
-        return; // Don't fall through to ticket system handling
+      // Handle Roblox lookup search type buttons
+      if (customId.startsWith('search_')) {
+        const command = require('./commands/rlookup');
+        if (command.handleButtonInteraction) {
+          await command.handleButtonInteraction(interaction);
+          return;
+        }
+      }
+
+      // Ticket system buttons
+      if (customId === 'report_player') {
+        await createTicket(interaction, 'player', STAFF_ROLE_ID);
+      }
+
+      if (customId === 'report_staff') {
+        await createTicket(interaction, 'staff', ADMIN_ROLE_ID);
+      }
+
+      if (customId === 'close_ticket') {
+        await showConclusionModal(interaction);
+      }
+
+      if (customId === 'delete_ticket_confirm') {
+        await deleteTicket(interaction);
+      }
+    } catch (error) {
+      console.error('Error handling button interaction:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        try {
+          await interaction.reply({ 
+            content: '❌ There was an error processing this button.', 
+            ephemeral: true 
+          });
+        } catch (replyError) {
+          console.error('Failed to send error message for button:', replyError.message);
+        }
       }
     }
-
-    // Ticket system buttons
-    if (customId === 'report_player') {
-      await createTicket(interaction, 'player', STAFF_ROLE_ID);
-    }
-
-    if (customId === 'report_staff') {
-      await createTicket(interaction, 'staff', ADMIN_ROLE_ID);
-    }
-
-    if (customId === 'close_ticket') {
-      await showConclusionModal(interaction);
-    }
-
-    if (customId === 'delete_ticket_confirm') {
-      await deleteTicket(interaction);
-    }
+    return;
   }
 
-  // --- Modal Handling ---
+  // --- Modal Handling with error handling ---
   if (interaction.isModalSubmit()) {
-    if (interaction.customId === 'conclusion_modal') {
-      await handleConclusionModal(interaction);
+    try {
+      if (interaction.customId === 'conclusion_modal') {
+        await handleConclusionModal(interaction);
+      }
+    } catch (error) {
+      console.error('Error handling modal submission:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        try {
+          await interaction.reply({ 
+            content: '❌ There was an error processing your submission.', 
+            ephemeral: true 
+          });
+        } catch (replyError) {
+          console.error('Failed to send error message for modal:', replyError.message);
+        }
+      }
     }
+    return;
   }
 });
 
@@ -163,12 +224,25 @@ async function showConclusionModal(interaction) {
     staffTag: interaction.user.tag // Store staff member's tag
   });
 
-  await interaction.showModal(modal);
+  try {
+    await interaction.showModal(modal);
+  } catch (error) {
+    console.error('Error showing modal:', error);
+    await interaction.reply({ 
+      content: '❌ Failed to open the conclusion modal. Please try again.', 
+      ephemeral: true 
+    });
+  }
 }
 
 // --- Handle conclusion modal submission ---
 async function handleConclusionModal(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (error) {
+    console.error('Error deferring reply for modal:', error);
+    return;
+  }
 
   const conclusionNotes = interaction.fields.getTextInputValue('conclusion_notes');
   const userId = [...pendingConclusions.entries()].find(([_, data]) => 
@@ -176,12 +250,12 @@ async function handleConclusionModal(interaction) {
   )?.[0];
 
   if (!userId) {
-    return interaction.followUp({ content: '❌ Error: Could not find ticket information.', ephemeral: true });
+    return tryToFollowUp(interaction, '❌ Error: Could not find ticket information.', true);
   }
 
   const pendingData = pendingConclusions.get(userId);
   if (!pendingData) {
-    return interaction.followUp({ content: '❌ Error: Ticket data not found.', ephemeral: true });
+    return tryToFollowUp(interaction, '❌ Error: Ticket data not found.', true);
   }
 
   // Clear pending conclusion
@@ -213,8 +287,12 @@ async function closeTicketWithConclusion(
   // Restrict user's access to the channel (CLOSE THE TICKET)
   const ticketChannel = interaction.guild.channels.cache.get(originalButtonInteraction.channel.id);
   if (ticketChannel) {
-    // Remove user's send messages permission
-    await ticketChannel.permissionOverwrites.edit(userId, { SendMessages: false });
+    try {
+      // Remove user's send messages permission
+      await ticketChannel.permissionOverwrites.edit(userId, { SendMessages: false });
+    } catch (error) {
+      console.log('Error updating permissions:', error.message);
+    }
     
     // Send closed notification to ticket channel
     const closedEmbed = new EmbedBuilder()
@@ -226,7 +304,11 @@ async function closeTicketWithConclusion(
       )
       .setTimestamp();
     
-    await ticketChannel.send({ embeds: [closedEmbed] });
+    try {
+      await ticketChannel.send({ embeds: [closedEmbed] });
+    } catch (error) {
+      console.log('Error sending closed embed:', error.message);
+    }
     
     // Add delete button for admins
     const deleteRow = new ActionRowBuilder().addComponents(
@@ -236,10 +318,14 @@ async function closeTicketWithConclusion(
         .setStyle(ButtonStyle.Danger)
     );
     
-    await ticketChannel.send({
-      content: 'This ticket is closed. Only admins can delete it.',
-      components: [deleteRow]
-    });
+    try {
+      await ticketChannel.send({
+        content: 'This ticket is closed. Only admins can delete it.',
+        components: [deleteRow]
+      });
+    } catch (error) {
+      console.log('Error sending delete button:', error.message);
+    }
     
     // Remove the close button from the original message
     try {
@@ -346,50 +432,57 @@ async function closeTicketWithConclusion(
     confirmationMessage = `🔒 Ticket closed and locked. User has left the server. Conclusion logged in <#${CONCLUSION_CHANNEL_ID}>. A delete button has been added for admins.`;
   }
   
-  await interaction.followUp({ 
-    content: confirmationMessage,
-    ephemeral: true 
-  });
+  await tryToFollowUp(interaction, confirmationMessage, true);
 }
 
 // --- Create ticket function ---
 async function createTicket(interaction, type, visibleRoleId) {
-  await interaction.deferReply({ ephemeral: true });
+  try {
+    await interaction.deferReply({ ephemeral: true });
+  } catch (error) {
+    console.error('Error deferring reply for ticket creation:', error);
+    return;
+  }
 
   if (tickets.has(interaction.user.id))
-    return interaction.editReply({ content: '❌ You already have an open ticket.' });
+    return tryToEditReply(interaction, { content: '❌ You already have an open ticket.' });
 
   if (tickets.size >= MAX_TICKETS)
-    return interaction.editReply({ content: '❌ Ticket queue is full right now.' });
+    return tryToEditReply(interaction, { content: '❌ Ticket queue is full right now.' });
 
-  const ticketChannel = await interaction.guild.channels.create({
-    name: `${type}-report-${interaction.user.username}`,
-    type: 0,
-    parent: CATEGORY_ID,
-    permissionOverwrites: [
-      { id: interaction.guild.id, deny: ['ViewChannel'] },
-      { id: interaction.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
-      { id: visibleRoleId, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] }
-    ]
-  });
+  try {
+    const ticketChannel = await interaction.guild.channels.create({
+      name: `${type}-report-${interaction.user.username}`.slice(0, 100), // Ensure name doesn't exceed limit
+      type: 0,
+      parent: CATEGORY_ID,
+      permissionOverwrites: [
+        { id: interaction.guild.id, deny: ['ViewChannel'] },
+        { id: interaction.user.id, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] },
+        { id: visibleRoleId, allow: ['ViewChannel', 'SendMessages', 'ReadMessageHistory'] }
+      ]
+    });
 
-  tickets.set(interaction.user.id, ticketChannel.id);
+    tickets.set(interaction.user.id, ticketChannel.id);
 
-  // Single button for closing ticket
-  const closeRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Close Ticket').setStyle(ButtonStyle.Secondary)
-  );
+    // Single button for closing ticket
+    const closeRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Close Ticket').setStyle(ButtonStyle.Secondary)
+    );
 
-  const welcomeMessage = await ticketChannel.send({
-    content: `Hello ${interaction.user}, thank you for your ${type === 'staff' ? 'staff misconduct' : 'player'} report.`,
-    embeds: [FORMAT_GUIDES[type]],
-    components: [closeRow]
-  });
+    const welcomeMessage = await ticketChannel.send({
+      content: `Hello ${interaction.user}, thank you for your ${type === 'staff' ? 'staff misconduct' : 'player'} report.`,
+      embeds: [FORMAT_GUIDES[type]],
+      components: [closeRow]
+    });
 
-  // Pin the format guide
-  await welcomeMessage.pin();
+    // Pin the format guide
+    await welcomeMessage.pin();
 
-  await interaction.editReply({ content: `✅ Ticket created: ${ticketChannel}`, ephemeral: true });
+    await tryToEditReply(interaction, { content: `✅ Ticket created: ${ticketChannel}` });
+  } catch (error) {
+    console.error('Error creating ticket:', error);
+    await tryToEditReply(interaction, { content: '❌ Failed to create ticket. Please try again.' });
+  }
 }
 
 // --- Delete ticket function (now separate button after closing) ---
@@ -399,24 +492,87 @@ async function deleteTicket(interaction) {
   const entry = [...tickets.entries()].find(([_, chId]) => chId === channelId);
   
   if (!entry) {
-    return interaction.reply({ content: '❌ Cannot find this ticket.', ephemeral: true });
+    return tryToReply(interaction, { content: '❌ Cannot find this ticket.', ephemeral: true });
   }
   
   const [userId] = entry;
 
   if (!interaction.member.roles.cache.has(Ticket_ADMIN_ROLE_ID))
-    return interaction.reply({ content: '❌ Only Admins can delete tickets.', ephemeral: true });
+    return tryToReply(interaction, { content: '❌ Only Admins can delete tickets.', ephemeral: true });
 
   // Delete from map and delete channel
   tickets.delete(userId);
   
   // Send confirmation before deleting
-  await interaction.reply({ content: '🗑 Deleting this ticket...', ephemeral: false });
+  try {
+    await interaction.reply({ content: '🗑 Deleting this ticket...', ephemeral: false });
+  } catch (error) {
+    console.log('Error replying before deletion:', error.message);
+  }
   
   // Small delay to show the message
   await new Promise(resolve => setTimeout(resolve, 1000));
   
-  await interaction.channel.delete();
+  try {
+    await interaction.channel.delete();
+  } catch (error) {
+    console.log('Error deleting channel:', error.message);
+    await tryToFollowUp(interaction, '❌ Failed to delete the ticket channel.', false);
+  }
+}
+
+// --- Helper functions for safe interaction responses ---
+async function tryToReply(interaction, options) {
+  try {
+    return await interaction.reply(options);
+  } catch (error) {
+    if (error.code === 10008 || error.code === 10003) {
+      console.log('Cannot reply - interaction expired or channel gone:', error.message);
+    } else {
+      console.error('Error replying to interaction:', error);
+    }
+    return null;
+  }
+}
+
+async function tryToEditReply(interaction, options) {
+  try {
+    return await interaction.editReply(options);
+  } catch (error) {
+    if (error.code === 10008) {
+      console.log('Cannot edit reply - message was deleted or expired');
+      // Try to send a new follow-up instead
+      try {
+        return await interaction.followUp({
+          ...options,
+          ephemeral: true
+        });
+      } catch (followUpError) {
+        console.error('Could not send follow-up either:', followUpError.message);
+      }
+    } else if (error.code === 10003) {
+      console.log('Cannot edit reply - channel gone');
+    } else {
+      console.error('Error editing reply:', error);
+    }
+    return null;
+  }
+}
+
+async function tryToFollowUp(interaction, content, ephemeral = true) {
+  try {
+    return await interaction.followUp({ 
+      content, 
+      ephemeral 
+    });
+  } catch (error) {
+    if (error.code === 10008 || error.code === 10003) {
+      console.log('Cannot follow up - interaction expired or channel gone');
+    } else {
+      console.error('Error following up:', error);
+    }
+    return null;
+  }
 }
 
 // --- Ready event and ticket recovery ---
@@ -437,6 +593,15 @@ client.once('ready', async () => {
   }
 
   console.log(`Recovered ${tickets.size} tickets after restart ✅`);
+});
+
+// --- Error handling for client ---
+client.on('error', error => {
+  console.error('Discord client error:', error);
+});
+
+process.on('unhandledRejection', error => {
+  console.error('Unhandled promise rejection:', error);
 });
 
 // --- Login ---
