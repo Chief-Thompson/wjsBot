@@ -1,6 +1,87 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const axios = require('axios');
 require('dotenv').config();
+
+const formatDurationSeconds = (durationValue) => {
+    if (durationValue === null || durationValue === undefined || durationValue === '') {
+        return 'Unknown';
+    }
+
+    let totalSeconds = null;
+    if (typeof durationValue === 'number') {
+        totalSeconds = durationValue;
+    } else if (typeof durationValue === 'string') {
+        if (durationValue === '0s' || durationValue === '0') {
+            return 'Permanent';
+        }
+        if (durationValue.endsWith('s')) {
+            const parsed = Number.parseInt(durationValue.slice(0, -1), 10);
+            if (!Number.isNaN(parsed)) {
+                totalSeconds = parsed;
+            }
+        } else {
+            const parsed = Number.parseInt(durationValue, 10);
+            if (!Number.isNaN(parsed)) {
+                totalSeconds = parsed;
+            }
+        }
+    }
+
+    if (totalSeconds === null || Number.isNaN(totalSeconds)) {
+        return String(durationValue);
+    }
+
+    if (totalSeconds <= 0) {
+        return 'Permanent';
+    }
+
+    const totalMinutes = Math.ceil(totalSeconds / 60);
+    if (totalMinutes < 60) {
+        return `${totalMinutes} minute${totalMinutes === 1 ? '' : 's'}`;
+    }
+
+    const totalHours = Math.ceil(totalMinutes / 60);
+    if (totalHours < 24) {
+        return `${totalHours} hour${totalHours === 1 ? '' : 's'}`;
+    }
+
+    const totalDays = Math.ceil(totalHours / 24);
+    return `${totalDays} day${totalDays === 1 ? '' : 's'}`;
+};
+
+const inferDurationSeconds = (startTime, endTime) => {
+    if (!startTime || !endTime) return null;
+    const startMs = Date.parse(startTime);
+    const endMs = Date.parse(endTime);
+    if (Number.isNaN(startMs) || Number.isNaN(endMs)) return null;
+    const diffSeconds = Math.max(0, Math.round((endMs - startMs) / 1000));
+    return diffSeconds;
+};
+
+const getDurationLabelFromRestriction = (restriction, log) => {
+    const durationCandidates = [
+        restriction?.duration,
+        restriction?.durationSeconds,
+        restriction?.lengthSeconds,
+        log?.duration,
+        log?.durationSeconds,
+        log?.lengthSeconds
+    ].filter((value) => value !== null && value !== undefined && value !== '');
+
+    if (durationCandidates.length > 0) {
+        return formatDurationSeconds(durationCandidates[0]);
+    }
+
+    const inferredSeconds = inferDurationSeconds(
+        restriction?.startTime || log?.createTime,
+        restriction?.endTime || log?.endTime
+    );
+    if (inferredSeconds !== null) {
+        return formatDurationSeconds(inferredSeconds);
+    }
+
+    return 'Permanent';
+};
 
 module.exports = {
     data: new SlashCommandBuilder()
@@ -28,6 +109,16 @@ module.exports = {
 
         // Track if we've successfully replied
         let hasReplied = false;
+        let cancelRequested = false;
+        let cancelController = null;
+        let cancelCollector = null;
+        const cancelButtonId = `banhistory_cancel_${interaction.id}`;
+        const cancelRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(cancelButtonId)
+                .setLabel('Cancel Search')
+                .setStyle(ButtonStyle.Danger)
+        );
         
         try {
             // Check if interaction is too old (over 14 minutes)
@@ -59,7 +150,8 @@ module.exports = {
                 ? 'Deep dive enabled (this can take 1-2 minutes for large histories).'
                 : 'Surface scan enabled (faster, limited pages).';
             await this.safeEditReply(interaction, {
-                content: `⏳ Fetching ban history for user ID \`${userId}\`. ${depthLabel} selected. ${depthNote}`
+                content: `⏳ Fetching ban history for user ID \`${userId}\`. ${depthLabel} selected. ${depthNote}`,
+                components: [cancelRow]
             });
 
             try {
@@ -83,6 +175,7 @@ module.exports = {
                     if (restriction?.active) {
                         const reason = restriction.displayReason || 'No reason provided';
                         const modDid = restriction.privateReason || "Not found";
+                        const durationLabel = getDurationLabelFromRestriction(restriction, null);
                         
                         currentStatusEmbed = new EmbedBuilder()
                             .setColor(0xFF0000)
@@ -90,7 +183,7 @@ module.exports = {
                             .addFields(
                                 { name: 'Status', value: 'Active Ban', inline: true },
                                 { name: 'Start Time', value: restriction.startTime || 'Unknown', inline: true },
-                                { name: 'Duration', value: restriction.duration || 'Unknown', inline: true },
+                                { name: 'Duration', value: durationLabel, inline: true },
                                 { name: 'Reason', value: reason, inline: false },
                                 { name: 'Moderator', value: modDid, inline: false },
                             )
@@ -114,7 +207,8 @@ module.exports = {
                 // Update with current status while we fetch history
                 await this.safeEditReply(interaction, {
                     content: `⏳ ${depth === 'deep' ? 'Deep dive' : 'Surface scan'} in progress for user ID \`${userId}\`.`,
-                    embeds: currentStatusEmbed ? [currentStatusEmbed] : []
+                    embeds: currentStatusEmbed ? [currentStatusEmbed] : [],
+                    components: [cancelRow]
                 });
 
                 // --- NEW APPROACH: Fetch logs with progress updates ---
@@ -125,10 +219,42 @@ module.exports = {
                     const maxPages = depth === 'deep' ? Number.POSITIVE_INFINITY : 50; // Surface uses old default page max
                     const startTime = Date.now();
                     const timeoutMs = depth === 'deep' ? 10 * 60 * 1000 : 90 * 1000; // Deep: 10 minutes, Surface: 90 seconds
+                    cancelController = new AbortController();
                     
                     console.log(`Starting historical logs fetch for user ${userId}`);
+
+                    const replyMessage = await interaction.fetchReply();
+                    cancelCollector = replyMessage.createMessageComponentCollector({
+                        filter: (i) => i.customId === cancelButtonId && i.user.id === interaction.user.id,
+                        time: timeoutMs
+                    });
+
+                    cancelCollector.on('collect', async (i) => {
+                        cancelRequested = true;
+                        if (cancelController) {
+                            cancelController.abort();
+                        }
+                        const disabledRow = new ActionRowBuilder().addComponents(
+                            new ButtonBuilder()
+                                .setCustomId(cancelButtonId)
+                                .setLabel('Cancel Search')
+                                .setStyle(ButtonStyle.Danger)
+                                .setDisabled(true)
+                        );
+
+                        await i.update({
+                            content: `⏹️ Cancelled. Returning results found so far for user ID \`${userId}\`...`,
+                            embeds: currentStatusEmbed ? [currentStatusEmbed] : [],
+                            components: [disabledRow]
+                        });
+                    });
                     
                     do {
+                        if (cancelRequested) {
+                            console.log('Cancel requested during logs fetch');
+                            break;
+                        }
+
                         // Check if we're taking too long
                         if (Date.now() - startTime > timeoutMs) {
                             console.log('Timeout reached during logs fetch');
@@ -139,7 +265,8 @@ module.exports = {
                         if (pageCount > 0 && pageCount % 3 === 0) {
                             await this.safeEditReply(interaction, {
                                 content: `⏳ ${depth === 'deep' ? 'Deep dive' : 'Surface scan'} still running... Processed ${pageCount} pages, found ${allLogs.length} total logs so far for user ID \`${userId}\`.`,
-                                embeds: currentStatusEmbed ? [currentStatusEmbed] : []
+                                embeds: currentStatusEmbed ? [currentStatusEmbed] : [],
+                                components: cancelRequested ? [] : [cancelRow]
                             });
                         }
                         
@@ -161,7 +288,8 @@ module.exports = {
                                     'Content-Type': 'application/json' 
                                 },
                                 params: params,
-                                timeout: 30000 // 30 seconds per request
+                                timeout: 30000, // 30 seconds per request
+                                signal: cancelController.signal
                             }
                         );
 
@@ -213,17 +341,14 @@ module.exports = {
                         displayLogs.forEach((log, index) => {
                             const erestriction = log.restrictionType?.gameJoinRestriction || {};
                             const actionType = log.active ? '🔨 BANNED' : '🔓 UNBANNED';
-                            const duration = log.duration && log.duration !== '0s'
-                                ? `${Math.round(parseInt(erestriction.duration) / 60)} minutes`
-                                : 'Permanent';
-                            
-                            const reason = log.displayReason ||'No reason provided';
-                            const staffM = log.privateReason || 'Unable to detect';
+                            const durationLabel = getDurationLabelFromRestriction(erestriction, log);
+                            const reason = erestriction.displayReason || log.displayReason || 'No reason provided';
+                            const staffM = erestriction.privateReason || log.privateReason || 'Not found';
                             const timestamp = new Date(erestriction.startTime || log.createTime).toLocaleString();
 
                             historyEmbed.addFields({
                                 name: `Entry ${index + 1} - ${actionType}`,
-                                value: `**Time:** ${timestamp}\n**Duration:** ${duration}\n**Reason:** ${reason}\n**Moderator:** ${staffM}`,
+                                value: `**Time:** ${timestamp}\n**Duration:** ${durationLabel}\n**Reason:** ${reason}\n**Moderator:** ${staffM}`,
                                 inline: false
                             });
                         });
@@ -249,15 +374,19 @@ module.exports = {
                     }
                     
                 } catch (logsErr) {
-                    console.log('❌ Historical logs fetch failed:', logsErr.message);
-                    historyEmbed = new EmbedBuilder()
-                        .setColor(0xFFA500)
-                        .setTitle(`📜 Ban History - User ID: ${userId}`)
-                        .setDescription('Failed to fetch historical ban logs. This could be due to:\n• Timeout (90 seconds)\n• Rate limiting\n• No permissions\n• User has no ban history')
-                        .addFields(
-                            { name: 'Error', value: logsErr.message || 'Unknown error', inline: false }
-                        )
-                        .setTimestamp();
+                    if (cancelRequested || logsErr.name === 'CanceledError' || logsErr.code === 'ERR_CANCELED') {
+                        console.log('Logs fetch cancelled by user');
+                    } else {
+                        console.log('❌ Historical logs fetch failed:', logsErr.message);
+                        historyEmbed = new EmbedBuilder()
+                            .setColor(0xFFA500)
+                            .setTitle(`📜 Ban History - User ID: ${userId}`)
+                            .setDescription('Failed to fetch historical ban logs. This could be due to:\n• Timeout (90 seconds)\n• Rate limiting\n• No permissions\n• User has no ban history')
+                            .addFields(
+                                { name: 'Error', value: logsErr.message || 'Unknown error', inline: false }
+                            )
+                            .setTimestamp();
+                    }
                 }
 
                 // --- Final reply ---
@@ -265,14 +394,22 @@ module.exports = {
                 if (currentStatusEmbed) embeds.push(currentStatusEmbed);
                 if (historyEmbed) embeds.push(historyEmbed);
 
+                if (cancelCollector) {
+                    cancelCollector.stop('completed');
+                }
+
                 if (embeds.length > 0) {
                     await this.safeEditReply(interaction, { 
-                        content: `✅ Completed ban history lookup for user ID \`${userId}\``,
-                        embeds: embeds 
+                        content: cancelRequested
+                            ? `✅ Cancelled search. Returning results found so far for user ID \`${userId}\``
+                            : `✅ Completed ban history lookup for user ID \`${userId}\``,
+                        embeds: embeds,
+                        components: []
                     });
                 } else {
                     await this.safeEditReply(interaction, {
-                        content: `❌ No ban information could be retrieved for user ID \`${userId}\`.`
+                        content: `❌ No ban information could be retrieved for user ID \`${userId}\`.`,
+                        components: []
                     });
                 }
 
