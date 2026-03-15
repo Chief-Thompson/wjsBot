@@ -12,8 +12,17 @@ module.exports = {
                 .setRequired(true))
         .addIntegerOption(option =>
             option.setName('duration')
-                .setDescription('Duration in minutes (0 for permanent)')
+                .setDescription('Duration value (0 for permanent)')
                 .setRequired(true))
+        .addStringOption(option =>
+            option.setName('unit')
+                .setDescription('Duration unit')
+                .setRequired(true)
+                .addChoices(
+                    { name: 'Minutes', value: 'minutes' },
+                    { name: 'Hours', value: 'hours' },
+                    { name: 'Days', value: 'days' }
+                ))
         .addStringOption(option =>
             option.setName('reason')
                 .setDescription('Reason for ban')
@@ -26,9 +35,21 @@ module.exports = {
         }
 
         const userId = interaction.options.getString('userid');
-        const durationMinutes = interaction.options.getInteger('duration');
+        const durationValue = interaction.options.getInteger('duration');
+        const durationUnit = interaction.options.getString('unit') || 'minutes';
         let reason = interaction.options.getString('reason');
         const LOG_CHANNEL_ID = '1420940072278032424';
+
+        let durationMinutes = 0;
+        if (durationValue > 0) {
+            if (durationUnit === 'hours') durationMinutes = durationValue * 60;
+            else if (durationUnit === 'days') durationMinutes = durationValue * 1440;
+            else durationMinutes = durationValue;
+        }
+
+        const durationLabel = durationValue === 0
+            ? 'Permanent'
+            : `${durationValue} ${durationUnit}`;
 
         // 🛡️ FILTER THE REASON FIRST
         const filtered = filterBanReason(reason);
@@ -82,7 +103,7 @@ module.exports = {
                         components: [] 
                     });
                     // Continue to main ban confirmation
-                    await this.showBanConfirmation(interaction, userId, durationMinutes, reason, LOG_CHANNEL_ID);
+                    await this.showBanConfirmation(interaction, userId, durationMinutes, durationLabel, reason, LOG_CHANNEL_ID);
                 } else {
                     await confirmation.update({ 
                         content: '❌ Ban cancelled.',
@@ -99,11 +120,11 @@ module.exports = {
             }
         } else {
             // If reason is safe, go directly to ban confirmation
-            await this.showBanConfirmation(interaction, userId, durationMinutes, reason, LOG_CHANNEL_ID);
+            await this.showBanConfirmation(interaction, userId, durationMinutes, durationLabel, reason, LOG_CHANNEL_ID);
         }
     },
 
-    async showBanConfirmation(interaction, userId, durationMinutes, reason, LOG_CHANNEL_ID) {
+    async showBanConfirmation(interaction, userId, durationMinutes, durationLabel, reason, LOG_CHANNEL_ID) {
         try {
             // Fetch Roblox user data
             const userResponse = await fetch(`https://users.roblox.com/v1/users/${userId}`);
@@ -127,7 +148,7 @@ module.exports = {
                 .addFields(
                     { name: '👤 Username', value: userData.name || 'Unknown', inline: true },
                     { name: '🆔 User ID', value: userId, inline: true },
-                    { name: '⏰ Duration', value: durationMinutes === 0 ? 'Permanent' : `${durationMinutes} minutes`, inline: true },
+                    { name: '⏰ Duration', value: durationLabel, inline: true },
                     { name: '📝 Reason', value: reason || 'No reason provided' }
                 )
                 .setFooter({ text: `Requested by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() })
@@ -171,7 +192,7 @@ module.exports = {
                 });
 
                 if (confirmation.customId === 'confirm_ban') {
-                    await this.executeBan(confirmation, userId, userData, durationMinutes, reason, LOG_CHANNEL_ID);
+                    await this.executeBan(confirmation, userId, userData, durationMinutes, durationLabel, reason, LOG_CHANNEL_ID);
                 } else {
                     await confirmation.update({
                         content: '❌ Ban cancelled.',
@@ -211,7 +232,7 @@ module.exports = {
         }
     },
 
-    async executeBan(interaction, userId, userData, durationMinutes, reason, LOG_CHANNEL_ID) {
+    async executeBan(interaction, userId, userData, durationMinutes, durationLabel, reason, LOG_CHANNEL_ID) {
         try {
             await interaction.deferUpdate();
             
@@ -227,7 +248,7 @@ module.exports = {
                 .addFields(
                     { name: '👤 Username', value: userData.name || 'Unknown', inline: true },
                     { name: '🆔 User ID', value: userId, inline: true },
-                    { name: '⏰ Duration', value: durationMinutes === 0 ? 'Permanent' : `${durationMinutes} minutes`, inline: true },
+                    { name: '⏰ Duration', value: durationLabel, inline: true },
                     { name: '📝 Reason', value: reason || 'No reason provided' }
                 )
                 .setFooter({ text: `Banned by ${interaction.user.tag}`, iconURL: interaction.user.displayAvatarURL() })
@@ -247,7 +268,7 @@ module.exports = {
                 .addFields(
                     { name: '👤 Username', value: `[${userData.name}](https://www.roblox.com/users/${userId}/profile)`, inline: true },
                     { name: '🆔 User ID', value: userId, inline: true },
-                    { name: '⏰ Duration', value: durationMinutes === 0 ? 'Permanent' : `${durationMinutes} minutes`, inline: true },
+                    { name: '⏰ Duration', value: durationLabel, inline: true },
                     { name: '📝 Reason', value: reason || 'No reason provided' },
                     { name: '🛠️ Moderator', value: `${interaction.user.tag} (\`${interaction.user.id}\`)`, inline: true },
                     { name: '📅 Banned At', value: `<t:${Math.floor(Date.now() / 1000)}:F>`, inline: true }

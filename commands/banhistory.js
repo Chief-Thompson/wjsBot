@@ -10,9 +10,19 @@ module.exports = {
             option.setName('userid')
                 .setDescription('The Roblox userId to check')
                 .setRequired(true)
+        )
+        .addStringOption(option =>
+            option.setName('depth')
+                .setDescription('Choose how deep to scan the logs')
+                .setRequired(false)
+                .addChoices(
+                    { name: 'Surface (faster)', value: 'surface' },
+                    { name: 'Deep dive (slower)', value: 'deep' }
+                )
         ),
     async execute(interaction) {
         const userId = interaction.options.getString('userid');
+        const depth = interaction.options.getString('depth') || 'deep';
         const universeId = process.env.UNIVERSE_ID;
         const apiKey = process.env.ROBLOX_API_KEY;
 
@@ -44,8 +54,12 @@ module.exports = {
             }
 
             // Send initial message about fetching with safe edit
+            const depthLabel = depth === 'deep' ? 'Deep dive' : 'Surface scan';
+            const depthNote = depth === 'deep'
+                ? 'Deep dive enabled (this can take 1-2 minutes for large histories).'
+                : 'Surface scan enabled (faster, limited pages).';
             await this.safeEditReply(interaction, {
-                content: `⏳ Fetching ban history for user ID \`${userId}\`. This may take up to a minute for users with extensive history...`
+                content: `⏳ Fetching ban history for user ID \`${userId}\`. ${depthLabel} selected. ${depthNote}`
             });
 
             try {
@@ -99,7 +113,7 @@ module.exports = {
                 
                 // Update with current status while we fetch history
                 await this.safeEditReply(interaction, {
-                    content: `⏳ Currently fetching historical logs for user ID \`${userId}\`. This may take up to a minute...`,
+                    content: `⏳ ${depth === 'deep' ? 'Deep dive' : 'Surface scan'} in progress for user ID \`${userId}\`.`,
                     embeds: currentStatusEmbed ? [currentStatusEmbed] : []
                 });
 
@@ -108,9 +122,9 @@ module.exports = {
                     let allLogs = [];
                     let nextPageToken = null;
                     let pageCount = 0;
-                    const maxPages = 50; // Increased for more thorough search
+                    const maxPages = depth === 'deep' ? Number.POSITIVE_INFINITY : 50; // Surface uses old default page max
                     const startTime = Date.now();
-                    const timeoutMs = 90000; // 90 second timeout total
+                    const timeoutMs = depth === 'deep' ? 10 * 60 * 1000 : 90 * 1000; // Deep: 10 minutes, Surface: 90 seconds
                     
                     console.log(`Starting historical logs fetch for user ${userId}`);
                     
@@ -124,7 +138,7 @@ module.exports = {
                         // Update progress every 3 pages
                         if (pageCount > 0 && pageCount % 3 === 0) {
                             await this.safeEditReply(interaction, {
-                                content: `⏳ Still fetching... Processed ${pageCount} pages, found ${allLogs.length} total logs so far for user ID \`${userId}\`.`,
+                                content: `⏳ ${depth === 'deep' ? 'Deep dive' : 'Surface scan'} still running... Processed ${pageCount} pages, found ${allLogs.length} total logs so far for user ID \`${userId}\`.`,
                                 embeds: currentStatusEmbed ? [currentStatusEmbed] : []
                             });
                         }
@@ -190,7 +204,7 @@ module.exports = {
                         historyEmbed = new EmbedBuilder()
                             .setColor(0x0099FF)
                             .setTitle(`📜 Ban History - User ID: ${userId}`)
-                            .setDescription(`Found **${allLogs.length}** historical moderation action(s) after searching ${pageCount} pages`)
+                            .setDescription(`Found **${allLogs.length}** historical moderation action(s) after searching ${pageCount} pages (${depthLabel})`)
                             .setTimestamp();
 
                         // Display up to 15 entries

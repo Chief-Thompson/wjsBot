@@ -1,6 +1,11 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const axios = require('axios');
 
+const axiosClient = axios.create({
+    timeout: 9000,
+    headers: { 'User-Agent': 'DiscordBot/1.0' }
+});
+
 // Track rate limits
 const rateLimitTracker = {
     lastRequest: 0,
@@ -8,6 +13,24 @@ const rateLimitTracker = {
     resetTime: 0,
     isRateLimited: false
 };
+
+// Simple in-memory cache to reduce repeat lookups
+const cache = new Map();
+const CACHE_TTL_MS = 3 * 60 * 1000;
+
+function getCache(key) {
+    const entry = cache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+        cache.delete(key);
+        return null;
+    }
+    return entry.value;
+}
+
+function setCache(key, value) {
+    cache.set(key, { value, expiresAt: Date.now() + CACHE_TTL_MS });
+}
 
 // Helper function to check rate limits
 function checkRateLimit() {
@@ -35,6 +58,34 @@ function checkRateLimit() {
     rateLimitTracker.requests++;
     rateLimitTracker.lastRequest = now;
     return { limited: false, timeLeft: 0 };
+}
+
+// Retry on transient failures and rate limits
+async function requestWithRetry(config, maxAttempts = 3) {
+    let attempt = 0;
+    let lastError = null;
+
+    while (attempt < maxAttempts) {
+        try {
+            return await axiosClient.request(config);
+        } catch (error) {
+            lastError = error;
+            const status = error.response?.status;
+            const isTransient = status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+            const isNetwork = !status;
+
+            if (!isTransient && !isNetwork) break;
+
+            const retryAfterHeader = error.response?.headers?.['retry-after'];
+            const retryAfterSeconds = retryAfterHeader ? parseInt(retryAfterHeader, 10) : null;
+            const backoffMs = retryAfterSeconds ? retryAfterSeconds * 1000 : 400 * Math.pow(2, attempt);
+
+            await new Promise(resolve => setTimeout(resolve, Math.min(backoffMs, 4000)));
+            attempt++;
+        }
+    }
+
+    throw lastError;
 }
 
 // Helper function to handle API errors
@@ -71,6 +122,12 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
     let exactMatch = null;
     let otherMatches = [];
     let rateLimitInfo = null;
+
+    const cacheKey = `${searchType}|${query.toLowerCase()}|${limit}`;
+    const cached = getCache(cacheKey);
+    if (cached) {
+        return cached;
+    }
     
     try {
         // Check rate limit before making any requests
@@ -90,11 +147,9 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
         // USER ID SEARCH
         if (searchType === 'userid' || (searchType === 'auto' && isNumeric)) {
             try {
-                const userResponse = await axios.get(`https://users.roblox.com/v1/users/${query}`, {
-                    timeout: 5000,
-                    headers: {
-                        'User-Agent': 'DiscordBot/1.0'
-                    }
+                const userResponse = await requestWithRetry({
+                    method: 'GET',
+                    url: `https://users.roblox.com/v1/users/${query}`
                 });
                 exactMatch = {
                     id: userResponse.data.id,
@@ -117,12 +172,14 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
                 }
                 // If specifically searching by userid and failed, return empty
                 if (searchType === 'userid') {
-                    return {
+                    const result = {
                         exactMatch: null,
                         displayNameMatches: [],
                         rateLimitInfo,
                         searchType: 'userid'
                     };
+                    setCache(cacheKey, result);
+                    return result;
                 }
             }
         }
@@ -130,17 +187,12 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
         // USERNAME SEARCH (exact)
         if (searchType === 'username' || (searchType === 'auto' && !isNumeric)) {
             try {
-                const usernameResponse = await axios.post(
-                    `https://users.roblox.com/v1/usernames/users`,
-                    { usernames: [query], excludeBannedUsers: false },
-                    {
-                        timeout: 5000,
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'User-Agent': 'DiscordBot/1.0'
-                        }
-                    }
-                );
+                const usernameResponse = await requestWithRetry({
+                    method: 'POST',
+                    url: `https://users.roblox.com/v1/usernames/users`,
+                    data: { usernames: [query], excludeBannedUsers: false },
+                    headers: { 'Content-Type': 'application/json' }
+                });
                 
                 if (usernameResponse.data.data && usernameResponse.data.data.length > 0) {
                     const user = usernameResponse.data.data[0];
@@ -155,21 +207,25 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
                     
                     // If specifically searching by username, return only exact match
                     if (searchType === 'username') {
-                        return { 
+                        const result = { 
                             exactMatch, 
                             displayNameMatches: [], 
                             rateLimitInfo: null,
                             searchType: 'username'
                         };
+                        setCache(cacheKey, result);
+                        return result;
                     }
                 } else if (searchType === 'username') {
                     // No exact username match found
-                    return {
+                    const result = {
                         exactMatch: null,
                         displayNameMatches: [],
                         rateLimitInfo: null,
                         searchType: 'username'
                     };
+                    setCache(cacheKey, result);
+                    return result;
                 }
             } catch (err) {
                 const apiError = handleApiError(err);
@@ -177,12 +233,14 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
                     rateLimitInfo = apiError;
                 }
                 if (searchType === 'username') {
-                    return {
+                    const result = {
                         exactMatch: null,
                         displayNameMatches: [],
                         rateLimitInfo,
                         searchType: 'username'
                     };
+                    setCache(cacheKey, result);
+                    return result;
                 }
             }
         }
@@ -191,13 +249,10 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
         if (searchType === 'displayname' || (searchType === 'auto' && !exactMatch) || (searchType === 'username' && !exactMatch)) {
             if (!rateLimitInfo) {
                 try {
-                    const searchResponse = await axios.get(
-                        `https://users.roblox.com/v1/users/search?keyword=${encodeURIComponent(query)}&limit=${Math.min(limit + 10, 30)}`,
-                        {
-                            timeout: 5000,
-                            headers: { 'User-Agent': 'DiscordBot/1.0' }
-                        }
-                    );
+                    const searchResponse = await requestWithRetry({
+                        method: 'GET',
+                        url: `https://users.roblox.com/v1/users/search?keyword=${encodeURIComponent(query)}&limit=${Math.min(limit + 10, 30)}`
+                    });
                     
                     const allUsers = searchResponse.data.data || [];
                     
@@ -274,21 +329,25 @@ async function smartUserSearch(query, searchType = 'auto', limit = 10) {
             }
         }
         
-        return {
+        const result = {
             exactMatch,
             displayNameMatches: otherMatches.slice(0, limit),
             rateLimitInfo,
             searchType: searchType
         };
+        setCache(cacheKey, result);
+        return result;
         
     } catch (error) {
         console.error('Roblox search error:', error);
-        return { 
+        const result = { 
             exactMatch: null, 
             displayNameMatches: [], 
             rateLimitInfo: { type: 'unknown', message: 'Unexpected error' },
             searchType: searchType
         };
+        setCache(cacheKey, result);
+        return result;
     }
 }
 
@@ -422,10 +481,10 @@ module.exports = {
                 
                 // Get avatar thumbnail
                 try {
-                    const avatarResponse = await axios.get(
-                        `https://thumbnails.roblox.com/v1/users/avatar?userIds=${exactMatch.id}&size=150x150&format=Png&isCircular=false`,
-                        { timeout: 3000 }
-                    );
+                    const avatarResponse = await requestWithRetry({
+                        method: 'GET',
+                        url: `https://thumbnails.roblox.com/v1/users/avatar?userIds=${exactMatch.id}&size=150x150&format=Png&isCircular=false`
+                    }, 2);
                     if (avatarResponse.data.data && avatarResponse.data.data[0]) {
                         embed.setThumbnail(avatarResponse.data.data[0].imageUrl);
                     }
@@ -586,6 +645,61 @@ module.exports = {
             await interaction.editReply({
                 embeds: [embed],
                 components: interaction.message.components // Keep existing components
+            });
+        }
+    },
+
+    // Handle select menu interactions for choosing a user
+    handleSelectInteraction: async (interaction) => {
+        if (!interaction.isStringSelectMenu()) return;
+
+        await interaction.deferUpdate();
+
+        const selectedId = interaction.values?.[0];
+        if (!selectedId) return;
+
+        try {
+            const userResponse = await requestWithRetry({
+                method: 'GET',
+                url: `https://users.roblox.com/v1/users/${selectedId}`
+            });
+
+            const user = userResponse.data;
+            const updatedEmbed = EmbedBuilder.from(interaction.message.embeds[0]);
+
+            const profileUrl = `https://www.roblox.com/users/${user.id}/profile`;
+            const verified = user.hasVerifiedBadge ? 'âœ…' : 'âŒ';
+
+            updatedEmbed.setFields([
+                {
+                    name: `Selected: ${user.displayName}`,
+                    value: `**Username:** @${user.name}\n**ID:** \`${user.id}\`\n**Verified:** ${verified}\n[View Profile](${profileUrl})`,
+                    inline: false
+                }
+            ]);
+
+            try {
+                const avatarResponse = await requestWithRetry({
+                    method: 'GET',
+                    url: `https://thumbnails.roblox.com/v1/users/avatar?userIds=${user.id}&size=150x150&format=Png&isCircular=false`
+                }, 2);
+                if (avatarResponse.data.data && avatarResponse.data.data[0]) {
+                    updatedEmbed.setThumbnail(avatarResponse.data.data[0].imageUrl);
+                }
+            } catch (err) {
+                console.log('Avatar fetch failed:', err.message);
+            }
+
+            await interaction.editReply({
+                embeds: [updatedEmbed],
+                components: interaction.message.components
+            });
+        } catch (error) {
+            console.error('Select user lookup error:', error);
+            await interaction.editReply({
+                content: 'There was an error retrieving that user. Please try again.',
+                embeds: interaction.message.embeds,
+                components: interaction.message.components
             });
         }
     }

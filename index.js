@@ -66,6 +66,17 @@ const FORMAT_GUIDES = {
       { name: '📋 Incident Description', value: 'Detailed explanation of what happened' }
     )
     .setFooter({ text: 'This report will only be visible to administrators. Please be patient.' })
+  ,
+  appeal: new EmbedBuilder()
+    .setColor(0xFFA500)
+    .setTitle('📝 Appeals Format')
+    .setDescription('Please provide the following information to help us review your appeal:')
+    .addFields(
+      { name: '👤 Roblox Username', value: 'Your Roblox username and user ID if possible' },
+      { name: '📌 Reason', value: 'What action are you appealing (ban, warning)?' },
+      { name: '🧾 Explanation', value: 'Explain what happened and why the appeal should be accepted' }
+    )
+    .setFooter({ text: 'Please be respectful and provide as much detail as possible.' })
 };
 
 // --- Interaction handler with improved error handling ---
@@ -143,6 +154,10 @@ client.on(Events.InteractionCreate, async interaction => {
         await createTicket(interaction, 'staff', ADMIN_ROLE_ID);
       }
 
+      if (customId === 'appeal_misconduct') {
+        await createTicket(interaction, 'appeal', ADMIN_ROLE_ID);
+      }
+
       if (customId === 'close_ticket') {
         await showConclusionModal(interaction);
       }
@@ -166,11 +181,46 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
+  // --- Select Menu Handling with error handling ---
+  if (interaction.isStringSelectMenu()) {
+    try {
+      if (interaction.customId === 'user_select') {
+        const command = require('./commands/rlookup');
+        if (command.handleSelectInteraction) {
+          await command.handleSelectInteraction(interaction);
+        }
+        return;
+      }
+    } catch (error) {
+      console.error('Error handling select menu interaction:', error);
+      if (!interaction.replied && !interaction.deferred) {
+        try {
+          await interaction.reply({
+            content: 'There was an error processing this selection.',
+            ephemeral: true
+          });
+        } catch (replyError) {
+          console.error('Failed to send error message for select menu:', replyError.message);
+        }
+      }
+    }
+    return;
+  }
+
   // --- Modal Handling with error handling ---
   if (interaction.isModalSubmit()) {
     try {
       if (interaction.customId === 'conclusion_modal') {
         await handleConclusionModal(interaction);
+        return;
+      }
+
+      if (interaction.customId === 'register_booster_modal') {
+        const command = require('./commands/register_booster');
+        if (command.handleModalSubmit) {
+          await command.handleModalSubmit(interaction);
+        }
+        return;
       }
     } catch (error) {
       console.error('Error handling modal submission:', error);
@@ -469,8 +519,9 @@ async function createTicket(interaction, type, visibleRoleId) {
       new ButtonBuilder().setCustomId('close_ticket').setLabel('🔒 Close Ticket').setStyle(ButtonStyle.Secondary)
     );
 
+    const reportTypeText = type === 'staff' ? 'staff misconduct' : type === 'appeal' ? 'appeal' : 'player';
     const welcomeMessage = await ticketChannel.send({
-      content: `Hello ${interaction.user}, thank you for your ${type === 'staff' ? 'staff misconduct' : 'player'} report.`,
+      content: `Hello ${interaction.user}, thank you for your ${reportTypeText} report.`,
       embeds: [FORMAT_GUIDES[type]],
       components: [closeRow]
     });
@@ -585,7 +636,7 @@ client.once('ready', async () => {
   if (category) {
     const childChannels = guild.channels.cache.filter(c => c.parentId === category.id);
     for (const [, channel] of childChannels) {
-      if (channel.name.startsWith('player-report') || channel.name.startsWith('staff-report')) {
+      if (channel.name.startsWith('player-report') || channel.name.startsWith('staff-report') || channel.name.startsWith('appeal-report')) {
         const userOverwrite = channel.permissionOverwrites.cache.find(po => po.type === 1 && po.allow.has('ViewChannel'));
         if (userOverwrite) tickets.set(userOverwrite.id, channel.id);
       }

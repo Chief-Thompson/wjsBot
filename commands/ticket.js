@@ -15,7 +15,11 @@ module.exports = {
       new ButtonBuilder()
         .setCustomId('report_staff')
         .setLabel('🧑‍💼 Report Staff Member')
-        .setStyle(ButtonStyle.Danger)
+        .setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId('appeal_misconduct')
+        .setLabel('Appeal')
+        .setStyle(ButtonStyle.Secondary)
     );
 
     await interaction.reply({
